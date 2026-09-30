@@ -1,0 +1,47 @@
+[project]
+name = "brain-ai-workspace"
+version = "1.0.0"
+description = "WorldQuant BRAIN AI Workspace"
+requires-python = "==3.12.*"
+dependencies = [
+    "cnhkmcp",
+    "fastmcp",
+    "tqdm",
+    "email-validator",
+    "aiohttp",
+    "webdriver-manager",
+    "greenlet>=3.3.1",
+    "playwright",
+    "openai",
+    "flask",
+    "flask-cors",
+    "werkzeug",
+    "wqb",
+    "jupyter",
+    "notebook",
+    "ipykernel",
+    "PyPDF2",
+    "pdfplumber",
+    "PyMuPDF",
+    "python-docx",
+    "docx2txt",
+    "striprtf",
+    "pypdf",
+    "cozepy",
+    "ply",
+    "Pillow",
+    "fastembed",
+    "chromadb",
+    "watchdog",
+    "requests",
+    "pandas",
+    "numpy",
+    "selenium",
+    "beautifulsoup4",
+    "pydantic",
+    "lxml",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

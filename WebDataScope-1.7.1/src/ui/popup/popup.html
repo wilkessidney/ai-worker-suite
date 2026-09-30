@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WorldQuant Scope 配置</title>
+    <link rel="stylesheet" href="popup.css">
+    <script src="../../vendor/js/pako.min.js"></script>
+    <script src="../../vendor/js/msgpack.min.js"></script>
+    <script src="../../vendor/js/jszip.min.js"></script>
+    <script src="../../shared/dataStore.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <form id="settingsForm">
+            <div class="checkbox-container">
+                <input type="checkbox" id="dataAnalysis">
+                <label for="dataAnalysis">启用数据分析</label>
+            </div>
+            <div class="checkbox-container">
+                <input type="checkbox" id="apiMonitorEnabled">
+                <label for="apiMonitorEnabled">显示 API 监控面板</label>
+            </div>
+            <h2>Genius 排名分析</h2>
+            <div class="checkbox-container">
+                <input type="checkbox" id="geniusCombineTag">
+                <label for="geniusCombineTag">是否考虑Combined Performance</label>
+            </div>
+            <div class="input-group">
+                <label for="geniusAlphaCount">Genius Alpha 数量</label>
+                <input id="geniusAlphaCount" type="number" placeholder="请输入 Genius Alpha 数量" required />
+            </div>
+            <button type="submit" id="saveBtn">保存设置</button>
+        </form>
+
+        <h2 style="margin-top:16px;text-align:left;">Data 文件</h2>
+        <div class="input-group">
+            <button id="importDataZipBtn" type="button" style="background-color:#0d6efd;">导入 Data Zip</button>
+            <input id="importDataZipFile" type="file" accept=".zip,application/zip,application/x-zip-compressed" style="display:none;" />
+        </div>
+
+        <h2 style="margin-top:16px;text-align:left;">社区数据</h2>
+        <div class="input-group" style="display:flex;gap:8px;flex-wrap:wrap;">
+            <div class="btn-row" style="width:100%">
+                <button id="exportCommunityBtn" type="button">导出(JSON)</button>
+                <button id="exportCommunityCompressedBtn" type="button" style="background-color:#198754;">导出(压缩)</button>
+            </div>
+            <button id="importCommunityBtn" type="button" style="background-color:#6c757d;">导入</button>
+            <input id="importCommunityFile" type="file" accept="application/json,.json,.wqcs" style="display:none;" />
+        </div>
+        <p id="status" aria-live="polite"></p>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>

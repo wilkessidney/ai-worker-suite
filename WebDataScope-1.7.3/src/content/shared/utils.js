@@ -1,0 +1,457 @@
+﻿function updateButton(buttonId, buttonText) {
+    // Update the button text and disable it
+    let startButton = document.getElementById(buttonId);
+    startButton.innerText = buttonText;
+    startButton.style.cursor = "default";
+    startButton.setAttribute("disabled", true);
+}
+
+function resetButton(buttonId, buttonText) {
+    // Reset the button text and enable it
+    let startButton = document.getElementById(buttonId);
+    startButton.innerText = buttonText;
+    startButton.style.cursor = "pointer";
+    startButton.removeAttribute("disabled");
+}
+
+function setButtonState(buttonId, buttonText, mode = 'disable') {
+    const button = document.getElementById(buttonId);
+
+    if (!button) {
+        console.warn(`Button with ID '${buttonId}' not found.`);
+        return;
+    }
+
+    if (mode === 'load') {
+        button.innerText = '⏳ ' + (buttonText || 'Loading...');
+        button.style.cursor = 'wait';
+        button.setAttribute('disabled', true);
+        button.style.opacity = '0.6';
+    } else if (mode === 'disable') {
+        button.innerText = buttonText;
+        button.style.cursor = 'default';
+        button.setAttribute('disabled', true);
+        button.style.opacity = '1';
+    } else if (mode === 'enable') {
+        button.innerText = buttonText;
+        button.removeAttribute('disabled');
+        button.style.cursor = 'pointer';
+        button.style.opacity = '1';
+    } else {
+        console.warn(`Invalid mode: ${mode}`);
+    }
+}
+
+function format(formatString, replacements) {
+  let result = formatString;
+  for (const [key, value] of Object.entries(replacements)) {
+    result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+  }
+  return result;
+}
+
+const WQP_SELF_SUMMARY_URL = 'https://api.worldquantbrain.com/users/self/consultant/summary';
+const WQP_SELF_SUMMARY_STORAGE_KEY = 'WQP_Summary';
+
+function getChromeLocalValue(key) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.get(key, (items) => {
+            if (chrome.runtime.lastError) {
+                reject(chrome.runtime.lastError);
+                return;
+            }
+            resolve(items?.[key]);
+        });
+    });
+}
+
+function setChromeLocalValue(key, value) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.set({ [key]: value }, () => {
+            if (chrome.runtime.lastError) {
+                reject(chrome.runtime.lastError);
+                return;
+            }
+            resolve();
+        });
+    });
+}
+
+async function getDataFromUrl(url, options = {}) {
+    // Retry until response.ok with timeout and exponential backoff
+    const {
+        timeoutMs = 15000,            // 单次请求超时
+        initialDelayMs = 1000,        // 初始重试延迟
+        maxDelayMs = 10000,           // 最大重试延迟
+        maxRetries = Infinity,        // 默认无限重试，直到 response.ok
+        onRetry = null                // 可选回调：({ attempt, status?, error?, nextDelayMs })
+    } = options;
+
+    const forceRefresh = options.forceRefresh === true;
+    const maxRetriesLimit = Number.isFinite(options.maxRetries) ? options.maxRetries : Infinity;
+    const storageKey = url === WQP_SELF_SUMMARY_URL ? WQP_SELF_SUMMARY_STORAGE_KEY : null;
+    if (storageKey && !forceRefresh) {
+        try {
+            const cachedData = await getChromeLocalValue(storageKey);
+            if (cachedData) return cachedData;
+        } catch (error) {
+            console.warn(`Failed to read ${storageKey} from chrome.storage.local`, error);
+        }
+    }
+
+    let attempt = 0;
+    let delayMs = initialDelayMs;
+
+    while (true) {
+        attempt += 1;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(new DOMException('Timeout', 'AbortError')), timeoutMs);
+        try {
+            const response = await fetch(url, {
+                referrer: "https://platform.worldquantbrain.com/",
+                referrerPolicy: "strict-origin-when-cross-origin",
+                body: null,
+                method: "GET",
+                mode: "cors",
+                credentials: "include",
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+
+            if (response.ok) {
+                const data = await response.json();
+                if (storageKey) {
+                    try {
+                        await setChromeLocalValue(storageKey, data);
+                    } catch (error) {
+                        console.warn(`Failed to save ${storageKey} to chrome.storage.local`, error);
+                    }
+                }
+                return data;
+            }
+
+            // 非 2xx，准备重试
+            const nextDelay = Math.min(maxDelayMs, Math.floor(delayMs * 1.5 + Math.random() * 200));
+            if (typeof onRetry === 'function') {
+                try { onRetry({ attempt, status: response.status, nextDelayMs: nextDelay }); } catch (_) { /* noop */ }
+            }
+
+            if (attempt >= maxRetriesLimit) {
+                throw new Error(`Failed to fetch ${url} after ${attempt} attempts, last status: ${response.status}`);
+            }
+
+            await new Promise(res => setTimeout(res, delayMs));
+            delayMs = nextDelay;
+        } catch (err) {
+            clearTimeout(timeoutId);
+            // 网络错误或超时，继续重试
+            const nextDelay = Math.min(maxDelayMs, Math.floor(delayMs * 1.5 + Math.random() * 200));
+            if (typeof onRetry === 'function') {
+                try { onRetry({ attempt, error: err, nextDelayMs: nextDelay }); } catch (_) { /* noop */ }
+            }
+
+            if (attempt >= maxRetriesLimit) {
+                throw new Error(`Failed to fetch ${url} after ${attempt} attempts due to error: ${err?.message || err}`);
+            }
+
+            await new Promise(res => setTimeout(res, delayMs));
+            delayMs = nextDelay;
+        }
+    }
+}
+
+async function getDataFromUrlWithOffsetParallel(formatUrl, limit, buttonName){
+    const CONCURRENCY = 10; // 同时进行的请求数
+
+    const initialUrl = format(formatUrl, { limit: limit, offset: 0 });
+    const initialData = await getDataFromUrl(initialUrl);
+    const totalCount = initialData.count;
+    let data = initialData.results;
+    let fetchedCount = data.length;
+    setButtonState(buttonName, `正在抓取 ${fetchedCount} / ${totalCount}`, 'load');
+
+    // 计算剩余请求
+    const remainingPages = Math.ceil(totalCount / limit) - 1;
+    const offsets = Array.from({ length: remainingPages }, (_, i) => (i + 1) * limit);
+
+    const urls = offsets.map(offset => format(formatUrl, { limit: limit, offset: offset }));
+
+    // 分批请求函数
+    const fetchBatch = async (batchUrls) => {
+        const batchRequests = batchUrls.map(url =>
+            getDataFromUrl(url).then(page => {
+                fetchedCount += page.results.length;
+                setButtonState(buttonName, `正在抓取 ${fetchedCount} / ${totalCount}`, 'load');
+                return page;
+            })
+        );
+        return await Promise.all(batchRequests);
+    };
+
+    // 执行分批请求
+    for (let i = 0; i < urls.length; i += CONCURRENCY) {
+        const batchUrls = urls.slice(i, i + CONCURRENCY);
+        const batchData = await fetchBatch(batchUrls);
+        batchData.forEach(page => data = data.concat(page.results));
+    }
+
+    console.log(`Fetched ${data.length} results, expected ${totalCount}`);
+    return data;
+}
+
+
+function waitForElement(selector, nonselector) {
+    return new Promise((resolve, reject) => {
+        const interval = setInterval(() => {
+            const element = document.querySelector(selector);
+            const nonElement = document.querySelector(nonselector);
+            if (element && !nonElement) {
+                clearInterval(interval);
+                resolve(element);
+            }
+        }, 100); // 每100毫秒检查一次
+
+        // 设置一个超时时间防止无限等待
+        const timeout = setTimeout(() => {
+            clearInterval(interval);
+            reject(new Error('元素查找超时或非期望元素存在'));
+        }, 30000); // 5秒后超时
+    });
+}
+
+function formatSavedTimestamp(dateString) {
+    const date = new Date(dateString);
+
+    // 美东时间 (Eastern Time, America/New_York)
+    const easternTime = date.toLocaleString("zh-CN", {
+        timeZone: "America/New_York",
+        hour12: false
+    });
+
+    // 北京时间 (Asia/Shanghai)
+    const beijingTime = date.toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        hour12: false
+    });
+
+    return [easternTime, beijingTime];
+}
+
+// Get current time as a Date object in Eastern timezone
+// This is used for date arithmetic and comparisons in Eastern time
+function getEasternTimeDate() {
+    const now = new Date();
+    const easternStr = now.toLocaleString("en-US", {
+        timeZone: "America/New_York"
+    });
+    return new Date(easternStr);
+}
+
+// Convert any date to Eastern timezone for comparison
+function toEasternTime(date) {
+    const d = new Date(date);
+    const easternStr = d.toLocaleString("en-US", {
+        timeZone: "America/New_York"
+    });
+    return new Date(easternStr);
+}
+
+// 定义一个变量来存储已提交的 Alpha 列表和上次更新时间
+let WQP_SubmittedAlphasCache = {
+    data: [],
+    lastUpdated: 0
+};
+
+// 增量更新和本地缓存已提交 Alpha 的函数
+async function fetchSubmittedAlphas(buttonId, forceRefresh = false) { // Add forceRefresh parameter
+    const CACHE_DURATION = 1 * 60 * 60 * 1000; // 缓存有效期1小时
+
+    // 从本地存储获取缓存
+    const storedCache = await new Promise(resolve => {
+        chrome.storage.local.get('WQP_SubmittedAlphasCache', (result) => {
+            resolve(result.WQP_SubmittedAlphasCache);
+        });
+    });
+
+    if (forceRefresh) {
+        console.log('Force refreshing: Clearing WQP_SubmittedAlphasCache from storage.');
+        await chrome.storage.local.remove('WQP_SubmittedAlphasCache');
+        WQP_SubmittedAlphasCache = { data: [], lastUpdated: 0 }; // Reset in-memory cache
+    } else if (storedCache && (Date.now() - storedCache.lastUpdated < CACHE_DURATION)) {
+        WQP_SubmittedAlphasCache = storedCache;
+        console.log('从缓存加载已提交的Alpha列表:', WQP_SubmittedAlphasCache.data.length);
+        return WQP_SubmittedAlphasCache.data;
+    }
+
+    console.log('缓存失效或不存在，开始获取新的已提交Alpha列表...');
+    // setButtonState(buttonId, `正在加载已提交的Alpha...`, 'load'); // Commented out as this buttonId might not exist globally
+
+    // 获取当前赛季的起始日期，与 genius.js 中的 fetchAllAlphas 逻辑类似
+    const currentDate = new Date();
+    const year = currentDate.getUTCFullYear();
+    const quarter = Math.floor((currentDate.getMonth() + 3) / 3);
+    const quarters = [
+        { start: `${year}-01-01T05:00:00.000Z`, end: `${year}-04-01T04:00:00.000Z` },  // 第一季度
+        { start: `${year}-04-01T04:00:00.000Z`, end: `${year}-07-01T04:00:00.000Z` },  // 第二季度
+        { start: `${year}-07-01T04:00:00.000Z`, end: `${year}-10-01T04:00:00.000Z` },  // 第三季度
+        { start: `${year}-10-01T04:00:00.000Z`, end: `${year + 1}-01-01T05:00:00.000Z` }   // 第四季度 (注意年份加1)
+    ];
+    const { start, end } = quarters[quarter - 1];
+    const dateRange = `dateSubmitted%3E${start}&dateSubmitted%3C${end}`;
+
+
+    const limit = 50; // Data limit per page
+    // 使用与 genius.js 中 fetchAllAlphas 类似的 URL 格式，但调整为获取已提交的 alpha
+    const formatUrl = `https://api.worldquantbrain.com/users/self/alphas?limit={limit}&offset={offset}&status!=UNSUBMITTED%1FIS-FAIL&${dateRange}&order=-dateCreated&hidden=false`;
+    
+    let allAlphas = [];
+    try {
+        allAlphas = await getDataFromUrlWithOffsetParallel(formatUrl, limit, buttonId);
+    } catch (error) {
+        console.error('获取已提交Alpha失败:', error);
+        // setButtonState(buttonId, `加载失败`, 'enable'); // Commented out
+        throw error; // 抛出错误以便调用方处理
+    }
+
+    // 过滤REGULAR类型：每天只保留前4个
+    const regularAlphas = allAlphas.filter(item => item.type === 'REGULAR');
+    const otherAlphas = allAlphas.filter(item => item.type !== 'REGULAR');
+
+    console.log('原始REGULAR alpha数量:', regularAlphas.length);
+
+    // 按日期分组
+    const alphasByDate = {};
+    regularAlphas.forEach(alpha => {
+        if (!alpha.dateSubmitted) return;
+
+        // 获取日期部分（YYYY-MM-DD）
+        const dateStr = alpha.dateSubmitted.split('T')[0];
+
+        if (!alphasByDate[dateStr]) {
+            alphasByDate[dateStr] = [];
+        }
+        alphasByDate[dateStr].push(alpha);
+    });
+
+    // 每天按提交时间排序，只保留前4个
+    const filteredRegularAlphas = [];
+    Object.keys(alphasByDate).forEach(dateStr => {
+        const dayAlphas = alphasByDate[dateStr];
+        // 按dateSubmitted升序排序（早的在前）
+        dayAlphas.sort((a, b) => new Date(a.dateSubmitted) - new Date(b.dateSubmitted));
+        // 只取前4个
+        filteredRegularAlphas.push(...dayAlphas.slice(0, 4));
+    });
+
+    console.log('过滤后REGULAR alpha数量（每天前4个）:', filteredRegularAlphas.length);
+
+    // 合并过滤后的REGULAR alpha和其他类型的alpha
+    const filteredAlphas = [...filteredRegularAlphas, ...otherAlphas];
+
+    // 更新缓存
+    WQP_SubmittedAlphasCache = {
+        data: filteredAlphas,
+        lastUpdated: Date.now()
+    };
+    chrome.storage.local.set({ WQP_SubmittedAlphasCache: WQP_SubmittedAlphasCache });
+    console.log('已提交的Alpha列表更新完成，总数:', filteredAlphas.length, '(REGULAR:', filteredRegularAlphas.length, ', 其他:', otherAlphas.length, ')');
+    // setButtonState(buttonId, `加载完成 (${filteredAlphas.length}个)`, 'enable'); // Commented out
+    return filteredAlphas;
+}
+
+let submittedFieldsCache = { data: [], lastUpdated: 0 }; // Used by getSubmittedFields
+let submittedFieldsPromise = null; // Used by getSubmittedFields
+
+async function getSubmittedFields(forceRefresh = false) {
+    if (submittedFieldsPromise && !forceRefresh) {
+        return submittedFieldsPromise;
+    }
+
+    submittedFieldsPromise = new Promise(async (resolve, reject) => {
+        try {
+            // fetchSubmittedAlphas is already in utils.js
+            const alphas = await fetchSubmittedAlphas('submitAlphaListLoading', forceRefresh); // Pass forceRefresh here
+            submittedFieldsCache.data = alphas;
+            submittedFieldsCache.lastUpdated = Date.now();
+            resolve(alphas);
+        } catch (error) {
+            console.error('获取已提交 Alpha 列表失败:', error);
+            submittedFieldsCache.data = []; // Clear cache on error
+            submittedFieldsCache.lastUpdated = 0;
+            reject(error);
+        }
+    });
+    return submittedFieldsPromise;
+}
+
+function removeComments(code) {
+    const lines = code.split('\n');
+    const cleanedLines = lines.map(line => line.split('#')[0].trim());
+    return cleanedLines.join('\n');
+}
+function escapeRegExp(str) {
+    return str.replace(/[.*+?^=!:${}()|\[\]\/\\]/g, '\\$&');
+}
+
+function findSingleOps(text) {
+    // 删除掉以+-号开头的数字
+    text = text.replace(/([+-])\d+/g, 'none');
+    const singleOps = ['+', '-', '*', '/', '^', '<=', '>=', '<', '>', '==', '!=', '?', '&&', '||'];
+    let count = [];
+    singleOps.sort((a, b) => b.length - a.length);  // Sort by operator length in descending order
+    singleOps.forEach(op => {
+        let regex = new RegExp(`${escapeRegExp(op)}`, 'g');
+        let matches = [...text.matchAll(regex)];
+        count = count.concat(Array(matches.length).fill(op));  // Add matched operator to the count
+        text = text.replace(regex, ' ');  // Replace matched operators with spaces
+    });
+    return count;
+}
+
+const splitFunc = (item) => {
+    return item.replace(' ', '').split(/[(),:+\-*/^<>=!?;\n#&|]+/).filter(part => part).map(item => item.replace(' ', ''));
+};
+
+function findOps(regular, operators) {
+    regular = removeComments(regular);
+    // console.log(splitFunc(regular));
+    const ops = [
+        ...splitFunc(regular).filter(item => operators.map(item => item.name).includes(item)),
+        ...findSingleOps(regular)
+    ];
+    return ops;
+}
+
+
+
+function rankDense(arr, ascending = true) {
+    // 1. 拷贝并排序唯一值
+    const sortedUnique = Array.from(new Set(arr)).sort((a, b) => ascending ? a - b : b - a);
+
+    // 2. 创建值到 rank 的映射
+    const rankMap = new Map();
+    sortedUnique.forEach((val, index) => {
+        rankMap.set(val, index + 1); // dense rank 从 1 开始
+    });
+
+    // 3. 映射原数组为 rank 数组
+    return arr.map(val => rankMap.get(val));
+}
+
+function formatSavedTimestamp(dateString) {
+    const date = new Date(dateString);
+
+    // 美东时间 (Eastern Time, America/New_York)
+    const easternTime = date.toLocaleString("zh-CN", {
+        timeZone: "America/New_York",
+        hour12: false
+    });
+
+    // 北京时间 (Asia/Shanghai)
+    const beijingTime = date.toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        hour12: false
+    });
+
+    return [easternTime, beijingTime];
+}

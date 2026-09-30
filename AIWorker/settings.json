@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__brain-mcp__create_simulation",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/remind_after_singleSim.py"
+          }
+        ]
+      }
+    ]
+  }
+}
